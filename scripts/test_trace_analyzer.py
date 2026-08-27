@@ -7,8 +7,8 @@ def main():
     print("=" * 80)
 
     trace_path = (
-        "results/traces/test_trace.jsonl"
-    )
+    "results/traces/real_olmoe_trace.jsonl"
+)
 
     analyzer = TraceAnalyzer(
         trace_path
