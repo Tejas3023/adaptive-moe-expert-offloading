@@ -31,3 +31,10 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated routing traces
+results/traces/*.jsonl
+
+# Large model and dataset files
+models/*
+data/*
