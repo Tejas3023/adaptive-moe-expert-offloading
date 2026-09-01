@@ -7,7 +7,7 @@ def main():
     print("=" * 80)
 
     trace_path = (
-    "results/traces/real_olmoe_trace.jsonl"
+    "results/traces/wikitext_10_samples.jsonl"
 )
 
     analyzer = TraceAnalyzer(

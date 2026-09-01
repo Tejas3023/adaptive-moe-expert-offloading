@@ -7,7 +7,7 @@ def main():
     print("CACHE CAPACITY EXPERIMENT")
     print("=" * 90)
 
-    trace_path = "results/traces/real_olmoe_trace.jsonl"
+    trace_path = "results/traces/wikitext_10_samples.jsonl"
 
     cache_capacities = [
         2,

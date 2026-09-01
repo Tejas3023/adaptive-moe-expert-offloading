@@ -3,15 +3,18 @@ from collections import OrderedDict
 
 class ExpertCache:
     """
-    A simple LRU cache for MoE experts.
+    LRU cache for OLMoE experts.
 
-    The cache stores expert IDs and simulates whether an expert
-    is currently resident in GPU memory.
+    Each cached item is identified by:
 
-    When the cache is full, the least recently used expert is evicted.
+        (layer_id, expert_id)
+
+    because Expert 18 in Layer 0 is different from
+    Expert 18 in Layer 7.
     """
 
     def __init__(self, capacity: int):
+
         if capacity <= 0:
             raise ValueError(
                 "Cache capacity must be greater than 0."
@@ -19,106 +22,145 @@ class ExpertCache:
 
         self.capacity = capacity
 
-        # OrderedDict allows us to implement LRU behavior.
+        # Key:
+        #     (layer_id, expert_id)
         #
-        # Left side  -> least recently used
-        # Right side -> most recently used
+        # Left  = least recently used
+        # Right = most recently used
         self.cache = OrderedDict()
 
         self.hits = 0
         self.misses = 0
         self.evictions = 0
 
-    def request(self, expert_id: int) -> bool:
-        """
-        Request an expert from the cache.
+        self.prefetches = 0
+        self.prefetch_hits = 0
+        self.prefetch_evictions = 0
 
-        Returns
-        -------
-        bool
+    def _key(self, layer_id, expert_id):
+        return (layer_id, expert_id)
+
+    def request(self, layer_id, expert_id):
+        """
+        Request an expert during actual model execution.
+
+        Returns:
             True  -> cache hit
             False -> cache miss
         """
 
-        # Cache hit
-        if expert_id in self.cache:
-            self.hits += 1
+        key = self._key(layer_id, expert_id)
 
-            # Move the expert to the most recently used position.
-            self.cache.move_to_end(expert_id)
+        if key in self.cache:
+
+            self.hits += 1
+            self.cache.move_to_end(key)
 
             return True
 
-        # Cache miss
         self.misses += 1
 
-        # Cache is full: evict least recently used expert.
-        if len(self.cache) >= self.capacity:
-            self.cache.popitem(last=False)
-            self.evictions += 1
-
-        # Add new expert as most recently used.
-        self.cache[expert_id] = True
+        self._insert(
+            key,
+            prefetch=False
+        )
 
         return False
 
-    def contains(self, expert_id: int) -> bool:
+    def prefetch(self, layer_id, expert_id):
         """
-        Check whether an expert is currently cached.
+        Load an expert into the cache before it is requested.
+
+        Prefetches do not count as normal cache requests.
         """
 
-        return expert_id in self.cache
+        key = self._key(layer_id, expert_id)
 
-    def cached_experts(self) -> list[int]:
-        """
-        Return cached experts from least recently used
-        to most recently used.
-        """
+        self.prefetches += 1
+
+        # Already resident.
+        if key in self.cache:
+            self.prefetch_hits += 1
+            self.cache.move_to_end(key)
+            return
+
+        self._insert(
+            key,
+            prefetch=True
+        )
+
+    def _insert(self, key, prefetch=False):
+
+        if len(self.cache) >= self.capacity:
+
+            self.cache.popitem(
+                last=False
+            )
+
+            self.evictions += 1
+
+            if prefetch:
+                self.prefetch_evictions += 1
+
+        self.cache[key] = True
+
+    def contains(self, layer_id, expert_id):
+
+        return self._key(
+            layer_id,
+            expert_id
+        ) in self.cache
+
+    def cached_experts(self):
 
         return list(self.cache.keys())
 
-    def size(self) -> int:
-        """
-        Return current number of cached experts.
-        """
+    def size(self):
 
         return len(self.cache)
 
-    def hit_rate(self) -> float:
-        """
-        Return cache hit rate as a percentage.
-        """
+    def hit_rate(self):
 
-        total_requests = self.hits + self.misses
+        total = self.hits + self.misses
 
-        if total_requests == 0:
+        if total == 0:
             return 0.0
 
         return (
-            self.hits / total_requests
+            self.hits / total
         ) * 100
 
-    def statistics(self) -> dict:
-        """
-        Return cache statistics.
-        """
+    def statistics(self):
 
         return {
             "capacity": self.capacity,
             "current_size": self.size(),
+
             "hits": self.hits,
             "misses": self.misses,
             "evictions": self.evictions,
-            "hit_rate_percent": self.hit_rate(),
+
+            "hit_rate_percent":
+                self.hit_rate(),
+
+            "prefetches":
+                self.prefetches,
+
+            "prefetch_hits":
+                self.prefetch_hits,
+
+            "prefetch_evictions":
+                self.prefetch_evictions,
         }
 
-    def clear(self) -> None:
-        """
-        Clear the cache and reset statistics.
-        """
+    def clear(self):
 
         self.cache.clear()
 
         self.hits = 0
         self.misses = 0
         self.evictions = 0
+
+        self.prefetches = 0
+        self.prefetch_hits = 0
+        self.prefetch_evictions = 0

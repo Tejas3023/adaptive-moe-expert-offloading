@@ -11,6 +11,7 @@ class ExpertRoutingTrace:
     """
 
     layer_id: int
+    sample_id: int
     token_position: int
     selected_experts: List[int]
     routing_weights: List[float]
@@ -49,6 +50,7 @@ class ExpertTraceLogger:
         self,
         router_logits: torch.Tensor,
         layer_id: int,
+        sample_id: int,
     ) -> List[ExpertRoutingTrace]:
         """
         Convert router logits from one OLMoE layer into routing traces.
@@ -128,6 +130,7 @@ class ExpertTraceLogger:
             trace = ExpertRoutingTrace(
                 layer_id=layer_id,
                 token_position=token_position,
+                sample_id=sample_id,
                 selected_experts=selected_experts[
                     token_position
                 ].tolist(),

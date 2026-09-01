@@ -28,6 +28,7 @@ def main():
     traces = logger.process_router_logits(
         router_logits=router_logits,
         layer_id=0,
+        sample_id=0,
     )
 
     print("\nRouting traces created.")

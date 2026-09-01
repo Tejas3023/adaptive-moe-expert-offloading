@@ -39,17 +39,32 @@ class CacheBenchmark:
     def run(self) -> dict:
         """
         Replay all expert requests from the trace file.
+
+        Each cache request is identified by both:
+
+            (layer_id, expert_id)
+
+        because Expert 18 in Layer 0 is a different physical
+        expert from Expert 18 in Layer 1.
         """
 
         for trace in self.traces:
+
+            layer_id = trace["layer_id"]
 
             selected_experts = (
                 trace["selected_experts"]
             )
 
             for expert_id in selected_experts:
+
+                expert_key = (
+                    layer_id,
+                    expert_id,
+                )
+
                 self.cache.request(
-                    expert_id
+                    expert_key
                 )
 
         return self.cache.statistics()
