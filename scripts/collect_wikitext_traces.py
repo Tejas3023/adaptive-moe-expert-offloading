@@ -1,15 +1,35 @@
 from pathlib import Path
+import sys
 
 import torch
 from datasets import load_dataset
+
+# ==============================================================
+# PROJECT ROOT
+# ==============================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ==============================================================
+# PROJECT IMPORTS
+# ==============================================================
 
 from src.modeling.olmoe_loader import (
     load_olmoe_model,
     load_tokenizer,
 )
+
 from src.tracing.expert_trace_logger import ExpertTraceLogger
 from src.tracing.trace_writer import TraceWriter
 
+
+# ==============================================================
+# CONFIGURATION
+# ==============================================================
 
 MODEL_NAME = "allenai/OLMoE-1B-7B-0924"
 
@@ -17,12 +37,17 @@ DATASET_NAME = "Salesforce/wikitext"
 DATASET_CONFIG = "wikitext-103-raw-v1"
 DATASET_SPLIT = "test"
 
-NUM_SAMPLES = 10
+NUM_SAMPLES = 100
+MAX_LENGTH = 256
 
 OUTPUT_FILE = Path(
-    "results/traces/wikitext_10_samples.jsonl"
+    "results/traces/wikitext_100_samples.jsonl"
 )
 
+
+# ==============================================================
+# MAIN
+# ==============================================================
 
 def main():
 
@@ -30,9 +55,9 @@ def main():
     print("WIKITEXT → REAL OLMOE EXPERT TRACE COLLECTION")
     print("=" * 80)
 
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
     # Load dataset
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
 
     print()
     print("=" * 80)
@@ -51,7 +76,10 @@ def main():
     print(f"Split: {DATASET_SPLIT}")
     print(f"Total dataset examples: {len(dataset)}")
 
-    # Remove empty WikiText records.
+    # ----------------------------------------------------------
+    # Select non-empty samples
+    # ----------------------------------------------------------
+
     samples = []
 
     for example in dataset:
@@ -64,11 +92,15 @@ def main():
         if len(samples) >= NUM_SAMPLES:
             break
 
-    print(f"Non-empty samples selected: {len(samples)}")
+    print()
+    print(
+        f"Non-empty samples selected: "
+        f"{len(samples)}"
+    )
 
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
     # Load tokenizer
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
 
     print()
     print("=" * 80)
@@ -77,9 +109,9 @@ def main():
 
     tokenizer = load_tokenizer()
 
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
     # Load model
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
 
     print()
     print("=" * 80)
@@ -90,9 +122,9 @@ def main():
 
     model.eval()
 
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
     # Create trace logger
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
 
     logger = ExpertTraceLogger(
         num_experts=64,
@@ -102,44 +134,66 @@ def main():
 
     total_tokens = 0
 
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
+    # Output directory
+    # ----------------------------------------------------------
+
+    OUTPUT_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # ----------------------------------------------------------
     # Process samples one at a time
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
 
     for sample_id, text in enumerate(samples):
 
         print()
         print("-" * 80)
-        print(f"PROCESSING SAMPLE {sample_id + 1}/{len(samples)}")
+        print(
+            f"PROCESSING WIKITEXT SAMPLE "
+            f"{sample_id + 1}/{len(samples)}"
+        )
         print("-" * 80)
 
-        # Keep the prompt reasonably small.
+        # Keep workload size consistent
         text = text[:2000]
 
         print()
         print("Text preview:")
-        print(text[:300].replace("\n", " "))
+        print(
+            text[:300].replace("\n", " ")
+        )
+
+        # ------------------------------------------------------
+        # Tokenize
+        # ------------------------------------------------------
 
         inputs = tokenizer(
             text,
             return_tensors="pt",
             truncation=True,
-            max_length=256,
+            max_length=MAX_LENGTH,
         )
 
         input_ids = inputs["input_ids"]
 
+        token_count = input_ids.shape[1]
+
         print()
         print(
-            f"Token count: "
-            f"{input_ids.shape[1]}"
+            f"Token count: {token_count}"
         )
 
-        total_tokens += input_ids.shape[1]
+        total_tokens += token_count
 
-        # --------------------------------------------------------------
+        # ------------------------------------------------------
         # Real OLMoE forward pass
-        # --------------------------------------------------------------
+        # ------------------------------------------------------
+
+        print()
+        print("Running real OLMoE forward pass...")
 
         with torch.no_grad():
 
@@ -155,9 +209,9 @@ def main():
             f"{len(router_logits)} layers"
         )
 
-        # --------------------------------------------------------------
+        # ------------------------------------------------------
         # Extract expert routing
-        # --------------------------------------------------------------
+        # ------------------------------------------------------
 
         for layer_id, layer_router_logits in enumerate(
             router_logits
@@ -174,63 +228,122 @@ def main():
             f"{len(logger)}"
         )
 
-        # Explicitly release the output tensors before next sample.
+        # ------------------------------------------------------
+        # Incremental save
+        # ------------------------------------------------------
+
+        current_traces = logger.get_traces()
+
+        progress_writer = TraceWriter(
+            OUTPUT_FILE
+        )
+
+        written = progress_writer.write(
+            current_traces
+        )
+
+        print(
+            f"Progress saved: "
+            f"{written} traces"
+        )
+
+        # ------------------------------------------------------
+        # Release tensors
+        # ------------------------------------------------------
+
         del outputs
         del router_logits
         del inputs
+        del input_ids
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # ------------------------------------------------------------------
-    # Write traces
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # FINAL TRACE COLLECTION
+    # ==========================================================
 
     traces = logger.get_traces()
 
+    # ==========================================================
+    # FINAL WRITE
+    # ==========================================================
+
     print()
     print("=" * 80)
-    print("WRITING TRACES")
+    print("WRITING FINAL WIKITEXT TRACES")
     print("=" * 80)
-
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
 
     writer = TraceWriter(
         OUTPUT_FILE
     )
 
-    written = writer.write(traces)
+    written = writer.write(
+        traces
+    )
 
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
-
-    print()
-    print("=" * 80)
-    print("TRACE COLLECTION SUMMARY")
-    print("=" * 80)
-
-    print()
-    print(f"Dataset samples processed: {len(samples)}")
-    print(f"Total input tokens: {total_tokens}")
-    print(f"Transformer layers: 16")
-    print(f"Experts per MoE layer: 64")
-    print(f"Experts selected per token: 8")
-    print(f"Total routing events: {len(traces)}")
-    print(f"Total expert selections: {len(traces) * 8}")
-    print(f"Traces written: {written}")
-
-    print()
-    print(f"Output file: {OUTPUT_FILE}")
+    # ==========================================================
+    # SUMMARY
+    # ==========================================================
 
     print()
     print("=" * 80)
-    print("WIKITEXT TRACE COLLECTION COMPLETE")
+    print("WIKITEXT TRACE COLLECTION SUMMARY")
     print("=" * 80)
 
+    print()
+    print(
+        f"Dataset samples processed: "
+        f"{len(samples)}"
+    )
+
+    print(
+        f"Total input tokens: "
+        f"{total_tokens}"
+    )
+
+    print(
+        "Transformer layers: 16"
+    )
+
+    print(
+        "Experts per MoE layer: 64"
+    )
+
+    print(
+        "Experts selected per token: 8"
+    )
+
+    print(
+        f"Total routing events: "
+        f"{len(traces)}"
+    )
+
+    print(
+        f"Total expert selections: "
+        f"{len(traces) * 8}"
+    )
+
+    print(
+        f"Traces written: "
+        f"{written}"
+    )
+
+    print()
+    print(
+        f"Output file: "
+        f"{OUTPUT_FILE}"
+    )
+
+    print()
+    print("=" * 80)
+    print("WIKITEXT 100-SAMPLE TRACE COLLECTION COMPLETE")
+    print("=" * 80)
+
+
+# ==============================================================
+# ENTRY POINT
+# ==============================================================
 
 if __name__ == "__main__":
     main()
