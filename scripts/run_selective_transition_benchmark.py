@@ -217,18 +217,17 @@ def run_benchmark(records, threshold):
             # available, count it as a useful prefetch.
             # -------------------------------------------------
 
+
             if key in outstanding_prefetches:
+                if key in cache.cached_gpu():
+                    useful_prefetches += 1
+                else:
+                    wasted_prefetches += 1
 
-                useful_prefetches += 1
+                outstanding_prefetches.remove(key)
 
-                outstanding_prefetches.remove(
-                    key
-                )
-
-            cache.request(
-                layer_id,
-                expert_id
-            )
+            cache.request(layer_id, expert_id)
+                
 
         # -------------------------------------------------
         # Update previous experts AFTER observing current
@@ -267,9 +266,7 @@ def run_benchmark(records, threshold):
     # Remaining outstanding prefetches were never consumed.
     # -----------------------------------------------------
 
-    wasted_prefetches = len(
-        outstanding_prefetches
-    )
+    wasted_prefetches += len(outstanding_prefetches)
 
     stats = cache.statistics()
 
@@ -339,6 +336,23 @@ def run_benchmark(records, threshold):
 
         "average_latency_ms": stats[
             "average_latency_ms"
+        ],
+
+        # Separate simulated demand and prefetch costs.
+        "demand_latency_ms": stats[
+            "demand_latency_ms"
+        ],
+
+        "prefetch_transfer_cost_ms": stats[
+            "prefetch_transfer_cost_ms"
+        ],
+
+        "average_demand_latency_ms": stats[
+            "average_demand_latency_ms"
+        ],
+
+        "prefetch_transfer_cost_per_demand_request_ms": stats[
+            "prefetch_transfer_cost_per_demand_request_ms"
         ],
     }
 
@@ -438,8 +452,18 @@ def main():
         )
 
         print(
-            f"  Average latency: "
+            f"  Average combined cost/request: "
             f"{result['average_latency_ms']:.4f} ms"
+        )
+
+        print(
+            f"  Demand cost/request: "
+            f"{result['average_demand_latency_ms']:.4f} ms"
+        )
+
+        print(
+            f"  Prefetch cost/request: "
+            f"{result['prefetch_transfer_cost_per_demand_request_ms']:.4f} ms"
         )
 
         print()
@@ -463,10 +487,12 @@ def main():
         f"{'Wasted':>10} "
         f"{'Util.':>9} "
         f"{'Disk':>10} "
-        f"{'Avg Latency':>14}"
+        f"{'Demand ms/req':>15} "
+        f"{'Prefetch ms/req':>16} "
+        f"{'Combined ms/req':>16}"
     )
 
-    print("-" * 120)
+    print("-" * 155)
 
     for r in results:
 
@@ -481,10 +507,12 @@ def main():
             f"{r['wasted_prefetches']:>10,} "
             f"{r['prefetch_utilization'] * 100:>8.2f}% "
             f"{r['disk_fetches']:>10,} "
-            f"{r['average_latency_ms']:>13.4f}"
+            f"{r['average_demand_latency_ms']:>15.4f} "
+            f"{r['prefetch_transfer_cost_per_demand_request_ms']:>16.4f} "
+            f"{r['average_latency_ms']:>16.4f}"
         )
 
-    print("=" * 120)
+    print("=" * 155)
 
 
 if __name__ == "__main__":

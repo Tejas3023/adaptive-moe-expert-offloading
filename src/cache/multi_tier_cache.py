@@ -1,3 +1,4 @@
+
 from collections import OrderedDict
 
 from src.cache.cost_model import CacheCostModel
@@ -11,9 +12,20 @@ class MultiTierExpertCache:
     Tier 2: CPU/RAM
     Tier 3: Disk
 
-    Each expert is identified by:
+    Each expert is identified by (layer_id, expert_id).
 
-        (layer_id, expert_id)
+    Cost accounting:
+        demand_latency_ms:
+            Cost of servicing actual expert requests.
+
+        prefetch_transfer_cost_ms:
+            Cost of transferring predicted experts into GPU memory.
+
+        total_latency_ms:
+            Combined simulated demand and prefetch transfer cost.
+
+    These values are simulation estimates, not measured
+    end-to-end OLMoE inference latency.
     """
 
     def __init__(
@@ -40,100 +52,106 @@ class MultiTierExpertCache:
         self.gpu = OrderedDict()
         self.cpu = OrderedDict()
 
+        # Demand request statistics.
         self.gpu_hits = 0
         self.cpu_hits = 0
         self.disk_fetches = 0
 
+        # Cache eviction statistics.
         self.gpu_evictions = 0
         self.cpu_evictions = 0
 
+        # Prefetch statistics.
         self.prefetches = 0
         self.prefetch_hits = 0
 
+        # Separate simulated cost accounting.
         self.total_latency_ms = 0.0
+        self.demand_latency_ms = 0.0
+        self.prefetch_transfer_cost_ms = 0.0
 
     def _key(self, layer_id, expert_id):
         return (layer_id, expert_id)
 
     def _insert_gpu(self, key):
+        """Insert an expert into GPU, evicting LRU if necessary."""
+        if key in self.gpu:
+            self.gpu.move_to_end(key)
+            return
+
         if len(self.gpu) >= self.gpu_capacity:
-            evicted = self.gpu.popitem(last=False)[0]
+            evicted_key = self.gpu.popitem(last=False)[0]
             self.gpu_evictions += 1
+            self._insert_cpu(evicted_key)
 
-            # Evicted GPU expert moves to CPU.
-            self._insert_cpu(evicted)
-
+        # An expert should not remain in both tiers.
+        self.cpu.pop(key, None)
         self.gpu[key] = True
 
     def _insert_cpu(self, key):
+        """Insert an expert into CPU, evicting LRU if necessary."""
+        if key in self.cpu:
+            self.cpu.move_to_end(key)
+            return
+
         if len(self.cpu) >= self.cpu_capacity:
             self.cpu.popitem(last=False)
             self.cpu_evictions += 1
 
         self.cpu[key] = True
 
+    def _record_demand_cost(self, cost):
+        """Record the simulated cost of an actual request."""
+        self.demand_latency_ms += cost
+        self.total_latency_ms += cost
+
+    def _record_prefetch_cost(self, cost):
+        """Record the simulated cost of a prefetch transfer."""
+        self.prefetch_transfer_cost_ms += cost
+        self.total_latency_ms += cost
+
     def request(self, layer_id, expert_id):
         """
         Request an expert during model execution.
 
         Returns:
-            "gpu"  -> GPU hit
-            "cpu"  -> CPU hit
-            "disk" -> disk fetch
+            "gpu": GPU hit
+            "cpu": CPU hit; transfer to GPU
+            "disk": Disk fetch; load into GPU
         """
-
         key = self._key(layer_id, expert_id)
 
-        # --------------------------------------------------
-        # GPU HIT
-        # --------------------------------------------------
-
+        # GPU hit.
         if key in self.gpu:
-
             self.gpu_hits += 1
-
             self.gpu.move_to_end(key)
 
-            self.total_latency_ms += (
+            self._record_demand_cost(
                 self.cost_model.hit_cost()
             )
-
             return "gpu"
 
-        # --------------------------------------------------
-        # CPU HIT
-        # --------------------------------------------------
-
+        # CPU hit.
         if key in self.cpu:
-
             self.cpu_hits += 1
-
             self.cpu.move_to_end(key)
 
-            self.total_latency_ms += (
+            self._record_demand_cost(
                 self.cost_model.cpu_fetch_cost()
             )
 
-            # Move CPU expert into GPU.
             self._insert_gpu(key)
-
-            # Remove old CPU copy.
             self.cpu.pop(key, None)
-
             return "cpu"
 
-        # --------------------------------------------------
-        # DISK FETCH
-        # --------------------------------------------------
-
+        # Disk miss.
         self.disk_fetches += 1
 
-        self.total_latency_ms += (
+        self._record_demand_cost(
             self.cost_model.disk_fetch_cost()
         )
 
         self._insert_gpu(key)
-
         return "disk"
 
     def prefetch(self, layer_id, expert_id):
@@ -141,57 +159,59 @@ class MultiTierExpertCache:
         Prefetch an expert into GPU memory.
 
         Returns:
-            "gpu"  -> already in GPU
-            "cpu"  -> moved from CPU
-            "disk" -> loaded from disk
+            "gpu": Already resident in GPU
+            "cpu": Transferred from CPU to GPU
+            "disk": Loaded from disk into GPU
+
+        Prefetch transfers contribute to total simulated cost,
+        but do not count as normal demand requests.
         """
-
-        key = self._key(
-            layer_id,
-            expert_id,
-        )
-
+        key = self._key(layer_id, expert_id)
         self.prefetches += 1
 
-        # Already in GPU.
+        # Already resident in GPU: no transfer cost.
         if key in self.gpu:
-
             self.prefetch_hits += 1
-
             self.gpu.move_to_end(key)
-
             return "gpu"
 
-        # Expert exists in CPU.
+        # Resident in CPU: CPU-to-GPU transfer.
         if key in self.cpu:
-
-            self.cpu_hits += 0  # no normal request
-
             self.cpu.pop(key)
 
-            self.total_latency_ms += (
+            self._record_prefetch_cost(
                 self.cost_model.cpu_fetch_cost()
             )
 
             self._insert_gpu(key)
-
             return "cpu"
 
-        # Otherwise it must come from disk.
-        self.total_latency_ms += (
+        # Not resident in either tier: disk-to-GPU transfer.
+        self._record_prefetch_cost(
             self.cost_model.disk_fetch_cost()
         )
 
         self._insert_gpu(key)
-
         return "disk"
 
     def statistics(self):
-
+        """Return cache counters and separated cost metrics."""
         total_requests = (
             self.gpu_hits
             + self.cpu_hits
             + self.disk_fetches
+        )
+
+        average_demand_cost = (
+            self.demand_latency_ms / total_requests
+            if total_requests
+            else 0.0
+        )
+
+        prefetch_cost_per_request = (
+            self.prefetch_transfer_cost_ms / total_requests
+            if total_requests
+            else 0.0
         )
 
         return {
@@ -210,23 +230,35 @@ class MultiTierExpertCache:
 
             "total_requests": total_requests,
 
+            # Backward-compatible combined cost metrics.
             "total_latency_ms": self.total_latency_ms,
-
             "average_latency_ms": (
                 self.total_latency_ms / total_requests
                 if total_requests
                 else 0.0
             ),
+
+            # New separated cost metrics.
+            "demand_latency_ms": self.demand_latency_ms,
+            "prefetch_transfer_cost_ms": (
+                self.prefetch_transfer_cost_ms
+            ),
+            "average_demand_latency_ms": average_demand_cost,
+            "prefetch_transfer_cost_per_demand_request_ms": (
+                prefetch_cost_per_request
+            ),
         }
 
     def cached_gpu(self):
+        """Return the keys currently resident in GPU."""
         return list(self.gpu.keys())
 
     def cached_cpu(self):
+        """Return the keys currently resident in CPU."""
         return list(self.cpu.keys())
 
     def clear(self):
-
+        """Clear cache contents and reset all statistics."""
         self.gpu.clear()
         self.cpu.clear()
 
@@ -241,3 +273,5 @@ class MultiTierExpertCache:
         self.prefetch_hits = 0
 
         self.total_latency_ms = 0.0
+        self.demand_latency_ms = 0.0
+        self.prefetch_transfer_cost_ms = 0.0
